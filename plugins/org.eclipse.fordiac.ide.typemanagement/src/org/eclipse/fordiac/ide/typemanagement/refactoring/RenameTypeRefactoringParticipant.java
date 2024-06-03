@@ -15,10 +15,8 @@ package org.eclipse.fordiac.ide.typemanagement.refactoring;
 
 import java.text.MessageFormat;
 import java.util.List;
-import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
-import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
@@ -26,17 +24,15 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.fordiac.ide.model.data.StructuredType;
 import org.eclipse.fordiac.ide.model.libraryElement.FBNetworkElement;
 import org.eclipse.fordiac.ide.model.libraryElement.FBType;
-import org.eclipse.fordiac.ide.model.libraryElement.INamedElement;
 import org.eclipse.fordiac.ide.model.libraryElement.LibraryElement;
 import org.eclipse.fordiac.ide.model.search.types.BlockTypeInstanceSearch;
-import org.eclipse.fordiac.ide.model.search.types.FBInstanceSearch;
 import org.eclipse.fordiac.ide.model.search.types.IEC61499ElementSearch;
-import org.eclipse.fordiac.ide.model.search.types.InstanceSearch;
-import org.eclipse.fordiac.ide.model.search.types.StructDataTypeSearch;
-import org.eclipse.fordiac.ide.model.typelibrary.DataTypeEntry;
 import org.eclipse.fordiac.ide.model.typelibrary.TypeEntry;
 import org.eclipse.fordiac.ide.model.typelibrary.TypeLibraryManager;
 import org.eclipse.fordiac.ide.typemanagement.Messages;
+import org.eclipse.fordiac.ide.typemanagement.refactoring.rename.FbInstanceChange;
+import org.eclipse.fordiac.ide.typemanagement.refactoring.rename.FbTypeChange;
+import org.eclipse.fordiac.ide.typemanagement.refactoring.rename.StructTypeChange;
 import org.eclipse.ltk.core.refactoring.Change;
 import org.eclipse.ltk.core.refactoring.CompositeChange;
 import org.eclipse.ltk.core.refactoring.RefactoringStatus;
@@ -108,29 +104,25 @@ public class RenameTypeRefactoringParticipant extends RenameParticipant {
 	}
 
 	private CompositeChange createStructDataChange() {
-		InstanceSearch search = StructDataTypeSearch
-				.createStructMemberSearch((StructuredType) typeEntry.getTypeEditable());
-		final IProject project = typeEntry.getFile().getProject();
-
-		final Set<INamedElement> allFBWithStruct = InstanceSearch.performProjectSearch(project,
-				StructDataTypeSearch.createStructMemberSearch((StructuredType) typeEntry.getTypeEditable()),
-				StructDataTypeSearch.createStructInterfaceSearch((StructuredType) typeEntry.getTypeEditable()),
-				new FBInstanceSearch((DataTypeEntry) typeEntry));
-		allFBWithStruct.addAll(search.searchStructuredTypes(typeEntry.getTypeLibrary()));
 		final CompositeChange parentChange = new CompositeChange(
 				MessageFormat.format(Messages.Refactoring_RenameFromTo, typeEntry.getTypeName(), newName));
-		parentChange.add(new UpdateTypeEntryChange(file, typeEntry, newName, oldName));
 
-		final CompositeChange change = new CompositeChange(Messages.Refactoring_AffectedStruct);
-		final CompositeChange fbTypeChanges = new CompositeChange("Fb Types:"); //$NON-NLS-1$
-		search = StructDataTypeSearch.createStructInterfaceSearch((StructuredType) typeEntry.getTypeEditable());
-		final Set<INamedElement> fbTypes = search.performTypeLibBlockSearch(typeEntry.getTypeLibrary());
-		fbTypes.forEach(fb -> fbTypeChanges.add(new InterfaceDataTypeChange((FBType) fb, typeEntry, oldName)));
-		parentChange.add(fbTypeChanges);
-		allFBWithStruct.stream().map(this::createSubChange).forEach(change::add);
+		final Change typeLibraryChange = new UpdateTypeEntryChange(file, typeEntry, newName, oldName);
+		parentChange.add(typeLibraryChange);
 
-		if (!allFBWithStruct.isEmpty()) {
-			parentChange.add(change);
+		final CompositeChange fbTypeChange = new FbTypeChange(file);
+		if (fbTypeChange.getChildren().length != 0) {
+			parentChange.add(fbTypeChange);
+		}
+
+		final CompositeChange structChange = new StructTypeChange(file, newName);
+		if (structChange.getChildren().length != 0) {
+			parentChange.add(structChange);
+		}
+
+		final CompositeChange fbInstanceChange = new FbInstanceChange(file);
+		if (fbInstanceChange.getChildren().length != 0) {
+			parentChange.add(fbInstanceChange);
 		}
 
 		return parentChange;
@@ -153,16 +145,4 @@ public class RenameTypeRefactoringParticipant extends RenameParticipant {
 		return parentChange;
 	}
 
-	private Change createSubChange(final INamedElement element) {
-		if (element instanceof final StructuredType stElement) {
-			return new StructuredTypeMemberChange(stElement, typeEntry, typeEntry.getTypeName(), newName);
-		}
-		if (element instanceof final FBType fbType) {
-			return new InterfaceDataTypeChange(fbType, typeEntry, oldName);
-		}
-		if (element instanceof final FBNetworkElement elem) {
-			return new UpdateInstancesChange(elem, typeEntry);
-		}
-		return null;
-	}
 }

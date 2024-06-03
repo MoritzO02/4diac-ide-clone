@@ -12,6 +12,8 @@
  *******************************************************************************/
 package org.eclipse.fordiac.ide.typemanagement.refactoring;
 
+import java.util.List;
+
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
@@ -27,23 +29,40 @@ import org.eclipse.ltk.core.refactoring.RefactoringStatus;
 public class StructuredTypeMemberChange extends Change {
 
 	private final StructuredType affectedStruct;
-	private final TypeEntry typeEntry;
-	private final String oldName;
+	private final TypeEntry oldTypeEntry;
+	private final List<String> affectedMembers;
+	private final String newStructMemberName;
 
 	private final CompoundCommand cmd = new CompoundCommand();
 
 	public StructuredTypeMemberChange(final StructuredType affectedStruct, final TypeEntry oldTypeEntry,
-			final String oldName, final String newName) {
+			final String newStructMemberName) {
+
 		this.affectedStruct = affectedStruct;
-		this.typeEntry = oldTypeEntry;
-		this.oldName = oldName;
+		this.oldTypeEntry = oldTypeEntry;
+		this.newStructMemberName = newStructMemberName;
+		this.affectedMembers = affectedStruct.getMemberVariables().stream()
+				.filter(var -> var.getType().equals(oldTypeEntry.getType())).map(VarDeclaration::getName).toList();
+
+		this.buildRefactoringChange();
+
+	}
+
+	public void buildRefactoringChange() {
+		final StructuredType structuredTypeEditable = (StructuredType) affectedStruct.getTypeEntry().getTypeEditable();
+		for (final VarDeclaration varDeclaration : structuredTypeEditable.getMemberVariables()) {
+			final String typeName = varDeclaration.getTypeName();
+			if (typeName.equals(this.oldTypeEntry.getTypeName())) {
+				cmd.add(ChangeDataTypeCommand.forDataType(varDeclaration,
+						(DataType) this.oldTypeEntry.getTypeEditable()));
+			}
+		}
+
 	}
 
 	@Override
 	public String getName() {
-		return "Update Struct Members - " + affectedStruct.getName() + "." //$NON-NLS-1$ //$NON-NLS-2$
-				+ affectedStruct.getTypeEntry().getFile().getFileExtension() + " - " //$NON-NLS-1$
-				+ affectedStruct.getTypeEntry().getFile().getProject().getName();
+		return "Update Struct Members: " + this.affectedMembers.toString(); //$NON-NLS-1$
 	}
 
 	@Override
@@ -56,17 +75,10 @@ public class StructuredTypeMemberChange extends Change {
 		return new RefactoringStatus();
 	}
 
-	/** TODO here we need to return the Undo change */
 	@Override
 	public Change perform(final IProgressMonitor pm) throws CoreException {
 
 		final StructuredType structuredTypeEditable = (StructuredType) affectedStruct.getTypeEntry().getTypeEditable();
-		for (final VarDeclaration varDeclaration : structuredTypeEditable.getMemberVariables()) {
-			final String typeName = varDeclaration.getTypeName();
-			if (typeName.equals(oldName)) {
-				cmd.add(ChangeDataTypeCommand.forDataType(varDeclaration, (DataType) typeEntry.getTypeEditable()));
-			}
-		}
 
 		cmd.execute();
 		structuredTypeEditable.getTypeEntry().save(structuredTypeEditable, pm);
@@ -75,8 +87,20 @@ public class StructuredTypeMemberChange extends Change {
 	}
 
 	@Override
-	public Object getModifiedElement() {
-		return null;
+	public StructuredType getModifiedElement() {
+		return this.affectedStruct;
+	}
+
+	public CompoundCommand getRefactoringCommand() {
+		return cmd;
+	}
+
+	public TypeEntry getModifiedTypeEntry() {
+		return this.oldTypeEntry;
+	}
+
+	public String getNewTypeEntryName() {
+		return this.newStructMemberName;
 	}
 
 }
