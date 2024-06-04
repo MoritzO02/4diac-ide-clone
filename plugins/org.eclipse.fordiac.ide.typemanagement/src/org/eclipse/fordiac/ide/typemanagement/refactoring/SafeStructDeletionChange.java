@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023 Primetals Technologies Austria GmbH
+ * Copyright (c) 2023, 2024 Primetals Technologies Austria GmbH
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -10,15 +10,14 @@
  * Contributors:
  *   Daniel Lindhuber
  *     - initial API and implementation and/or initial documentation
+ *   Bianca Wiesmayr - rework to new struct search
  *******************************************************************************/
 package org.eclipse.fordiac.ide.typemanagement.refactoring;
 
 import java.text.MessageFormat;
-import java.util.Arrays;
-import java.util.Collection;
 import java.util.EnumSet;
-import java.util.List;
-import java.util.stream.Collectors;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -31,156 +30,84 @@ import org.eclipse.fordiac.ide.model.commands.delete.DeleteSubAppInterfaceElemen
 import org.eclipse.fordiac.ide.model.data.DataType;
 import org.eclipse.fordiac.ide.model.data.StructuredType;
 import org.eclipse.fordiac.ide.model.datatype.helper.IecTypes;
-import org.eclipse.fordiac.ide.model.helpers.PackageNameHelper;
 import org.eclipse.fordiac.ide.model.libraryElement.ErrorMarkerDataType;
-import org.eclipse.fordiac.ide.model.libraryElement.FBNetworkElement;
 import org.eclipse.fordiac.ide.model.libraryElement.FBType;
-import org.eclipse.fordiac.ide.model.libraryElement.LibraryElement;
 import org.eclipse.fordiac.ide.model.libraryElement.StructManipulator;
 import org.eclipse.fordiac.ide.model.libraryElement.SubApp;
-import org.eclipse.fordiac.ide.model.libraryElement.SubAppType;
+import org.eclipse.fordiac.ide.model.libraryElement.VarDeclaration;
 import org.eclipse.fordiac.ide.model.search.AbstractLiveSearchContext;
-import org.eclipse.fordiac.ide.model.search.types.FBInstanceSearch;
-import org.eclipse.fordiac.ide.model.search.types.StructDataTypeSearch;
+import org.eclipse.fordiac.ide.model.search.types.DataTypeInstanceSearch;
+import org.eclipse.fordiac.ide.model.typelibrary.DataTypeEntry;
 import org.eclipse.fordiac.ide.model.typelibrary.DataTypeLibrary;
 import org.eclipse.fordiac.ide.model.typelibrary.TypeEntry;
-import org.eclipse.fordiac.ide.systemmanagement.SystemManager;
 import org.eclipse.fordiac.ide.typemanagement.Messages;
 import org.eclipse.gef.commands.Command;
 import org.eclipse.gef.commands.CompoundCommand;
 import org.eclipse.ltk.core.refactoring.Change;
 import org.eclipse.ltk.core.refactoring.CompositeChange;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.IEditorReference;
-import org.eclipse.ui.PlatformUI;
 
 public class SafeStructDeletionChange extends CompositeChange {
 
-	private static List<String> editorNames = null;
-
 	public SafeStructDeletionChange(final StructuredType struct) {
 		super(Messages.DeleteFBTypeParticipant_Change_SafeDeletionChangeTitle);
-		editorNames = loadOpenEditorNames();
-		addDeleteChanges(this, struct);
-		addUpdateStructManipulatorChanges(this, struct);
+		final DataTypeEntry typeEntry = (DataTypeEntry) struct.getTypeEntry();
+		createChanges(typeEntry, this);
 	}
 
-	private static List<String> loadOpenEditorNames() {
-		// @formatter:off
-		final var wrapper = new Object() { IEditorReference[] refs; };
-		Display.getDefault().syncExec(() -> {
-			wrapper.refs = PlatformUI.getWorkbench()
-				.getActiveWorkbenchWindow()
-				.getActivePage()
-				.getEditorReferences();
-		});
-
-		return Arrays.stream(wrapper.refs)
-			.map(IEditorReference::getName)
-			.map(SafeStructDeletionChange::removeFileEnding)
-			.collect(Collectors.toList());
-		// @formatter:on
-	}
-
-	private static String removeFileEnding(final String name) {
-		final int lastIndexOf = name.lastIndexOf('.');
-		if (lastIndexOf <= 0) {
-			return name;
+	private static void createChanges(final DataTypeEntry entry, final CompositeChange change) {
+		final Set<EObject> rootElements = new HashSet<>();
+		if (entry != null) {
+			final var results = new DataTypeInstanceSearch(entry).performSearch();
+			results.forEach(obj -> {
+				if (obj instanceof final VarDeclaration varDecl) {
+					if (varDecl.eContainer() instanceof final StructuredType struct && rootElements.add(struct)) {
+						change.add(new DeleteMemberVariableChange(entry, varDecl.getName()));
+					} else if (isUntypedSubappPin(varDecl) && rootElements.add(varDecl)) {
+						change.add(new DeleteUntypedSubappPinChange(varDecl));
+					} else if (isFbTypePin(varDecl) && rootElements.add(varDecl)) {
+						change.add(new DeleteFBTypeInterfaceChange((FBType) varDecl.eContainer().eContainer(),
+								(StructuredType) varDecl.getType()));
+					}
+					change.add(handleRootElement(varDecl, rootElements));
+				} else if (obj instanceof final StructManipulator muxer && rootElements.add(muxer)) {
+					change.add(new UpdateManipulatorChange(muxer));
+				}
+			});
 		}
-		return name.substring(0, lastIndexOf);
 	}
 
-	public static boolean hasOpenEditor(final EObject modelObj) {
-		final EObject rootContainer = EcoreUtil.getRootContainer(EcoreUtil.getRootContainer(modelObj));
-		if (rootContainer instanceof final LibraryElement elem) {
-			editorNames.contains(elem.getName());
+	private static Change handleRootElement(final VarDeclaration varDecl, final Set<EObject> rootElements) {
+		final DataTypeEntry dataTypeEntry = (DataTypeEntry) varDecl.getType().getTypeEntry();
+		if (varDecl.getFBNetworkElement() != null) {
+			if (rootElements.add(varDecl.getFBNetworkElement())) {
+				return new UpdateInstancesChange(varDecl.getFBNetworkElement(), dataTypeEntry);
+			}
+		} else {
+			final EObject rootContainer = EcoreUtil.getRootContainer(varDecl);
+			if (rootElements.add(rootContainer)) {
+				if (rootContainer instanceof final StructuredType stElement) {
+					final CompositeChange change = new CompositeChange(MessageFormat.format(
+							Messages.Refactoring_AffectedStruct, stElement.getName(), dataTypeEntry.getTypeName()));
+					change.add(new StructuredTypeMemberChange(stElement, dataTypeEntry, dataTypeEntry.getTypeName(),
+							dataTypeEntry.getTypeName()));
+					createChanges((DataTypeEntry) stElement.getTypeEntry(), change);
+					return change;
+				}
+				if (rootContainer instanceof final FBType fbType) {
+					return new InterfaceDataTypeChange(fbType, dataTypeEntry, varDecl.getName());
+				}
+			}
 		}
-		return true;
+		return null;
 	}
 
-	private static void addDeleteChanges(final CompositeChange change, final StructuredType struct) {
-		// @formatter:off
-		// struct members
-		StructDataTypeSearch.createStructMemberSearch(struct)
-			.searchStructuredTypes(struct.getTypeLibrary())
-			.stream()
-			.map(StructuredType.class::cast)
-			.map(StructuredType::getTypeEntry)
-			.map(entry -> new DeleteMemberVariableChange(entry, struct.getName()))
-			.forEach(change::add);
-
-		// fb types and its instances
-		StructDataTypeSearch.createStructInterfaceSearch(struct)
-			.performTypeLibBlockSearch(struct.getTypeLibrary())
-			.stream()
-			.map(FBType.class::cast)
-			.map(fbType -> new DeleteFBTypeInterfaceChange(fbType, struct))
-			.forEach(updateFBTypeChange -> addFbTypeInstances(updateFBTypeChange, change, struct));
-
-
-		// untyped subapps
-		StructDataTypeSearch.createStructSubappPinSearch(struct).performCompleteSearch().stream()
-			.map(SubApp.class::cast)
-			.map(sub -> new DeleteUntypedSubappPinsChange(sub, struct))
-			.forEach(change::add);
-
-		// @formatter:on
+	private static boolean isUntypedSubappPin(final VarDeclaration varDecl) {
+		return varDecl.eContainer() != null && varDecl.eContainer().eContainer() instanceof final SubApp sub
+				&& !sub.isTyped() && !sub.isContainedInTypedInstance();
 	}
 
-	public static void addUpdateChanges(final CompositeChange parentChange, final TypeEntry entry) {
-		final StructuredType type = (StructuredType) entry.getType();
-		addUpdateStructManipulatorChanges(parentChange, type);
-		addUpdateFBTypeChanges(parentChange, type);
-		addUpdateUntypedSubappPinChanges(parentChange, type);
-	}
-
-	private static void addUpdateStructManipulatorChanges(final CompositeChange parentChange,
-			final StructuredType struct) {
-		// @formatter:off
-		final StructDataTypeSearch search = StructDataTypeSearch.createStructManipulatorSearch(struct);
-		SystemManager.INSTANCE.getProjectSystems(struct.getTypeEntry().getFile().getProject()).stream()
-			.map(search::performApplicationSearch)
-			.flatMap(Collection::stream)
-			.map(StructManipulator.class::cast)
-			.map(UpdateManipulatorChange::new)
-			.forEach(parentChange::add);
-		// @formatter:off
-	}
-
-	private static void addUpdateFBTypeChanges(final CompositeChange parentChange, final StructuredType struct) {
-		// @formatter:off
-		StructDataTypeSearch.createStructInterfaceSearch(struct)
-			.performTypeLibBlockSearch(struct.getTypeLibrary())
-			.stream()
-			.map(FBType.class::cast)
-			.map(UpdateFBTypeChange::new)
-			.forEach(parentChange::add);
-		// @formatter:on
-	}
-
-	private static void addFbTypeInstances(final DeleteFBTypeInterfaceChange updateFBTypeChange,
-			final CompositeChange parentChange, final StructuredType struct) {
-
-		final FBType fbType = updateFBTypeChange.getFBType();
-		final var fbInstances = new FBInstanceSearch(fbType)
-				.performProjectSearch(fbType.getTypeEntry().getFile().getProject());
-
-		fbInstances.forEach(fbn -> {
-			updateFBTypeChange.add(new UpdateInstancesChange((FBNetworkElement) fbn));
-		});
-
-		parentChange.add(updateFBTypeChange);
-
-	}
-
-	private static void addUpdateUntypedSubappPinChanges(final CompositeChange parentChange,
-			final StructuredType struct) {
-		// @formatter:off
-		StructDataTypeSearch.createStructSubappPinSearch(struct).performCompleteSearch().stream()
-			.map(SubApp.class::cast)
-			.map(sub -> new UpdateUntypedSubappChange(sub, struct))
-			.forEach(parentChange::add);
-		// @formatter:on
+	private static boolean isFbTypePin(final VarDeclaration varDecl) {
+		return varDecl.eContainer() != null && varDecl.eContainer().eContainer() instanceof FBType;
 	}
 
 	public static class DeleteMemberVariableChange extends CompositeChange implements IFordiacPreviewChange {
@@ -194,9 +121,6 @@ public class SafeStructDeletionChange extends CompositeChange {
 			this.entry = entry;
 			this.deleteName = deleteName;
 			this.state.addAll(getDefaultSelection());
-			if (!hasOpenEditor(entry.getType())) {
-				SafeStructDeletionChange.addUpdateChanges(this, entry);
-			}
 		}
 
 		@Override
@@ -244,45 +168,25 @@ public class SafeStructDeletionChange extends CompositeChange {
 
 	}
 
-	public static class DeleteUntypedSubappPinsChange extends CompositeChange {
+	public static class DeleteUntypedSubappPinChange extends CompositeChange {
+		VarDeclaration varDecl;
 
-		final SubApp subapp;
-		final StructuredType struct;
-
-		public DeleteUntypedSubappPinsChange(final SubApp subapp, final StructuredType struct) {
+		public DeleteUntypedSubappPinChange(final VarDeclaration varDecl) {
 			super(MessageFormat.format(Messages.DeleteFBTypeParticipant_Change_DeleteSubappPins,
-					subapp.getQualifiedName()));
-			this.subapp = subapp;
-			this.struct = struct;
-			// could be problematic because as far as i know there is no "update FBs" dialog
-			// if you save a subapp that is contained inside a cfb/typed subapp
-			if (!hasOpenEditor(subapp)) {
-				addUpdateChanges();
-			}
+					getSubappName(varDecl)));
+			this.varDecl = varDecl;
 		}
 
-		// triggers the update chain if the subapp is contained inside a typed network
-		private void addUpdateChanges() {
-			// CFB cannot contain a subapp -> only a typed subapp can
-			if (EcoreUtil.getRootContainer(subapp) instanceof final SubAppType type) {
-				SafeFBTypeDeletionChange.addUpdateChanges(this, type, false);
-			}
+		private static String getSubappName(final VarDeclaration varDecl) {
+			return ((SubApp) varDecl.eContainer().eContainer()).getQualifiedName();
 		}
 
 		@Override
 		public Change perform(final IProgressMonitor pm) throws CoreException {
-			final CompoundCommand cmd = new CompoundCommand();
-			final String structFullName = PackageNameHelper.getFullTypeName(struct);
-			// @formatter:off
-			subapp.getInterface().getAllInterfaceElements().stream()
-				.filter(ie -> PackageNameHelper.getFullTypeName(ie.getType()).equalsIgnoreCase(structFullName))
-				.map(DeleteSubAppInterfaceElementCommand::new)
-				.forEach(cmd::add);
-			// @formatter:on
-			ChangeExecutionHelper.executeChange(cmd, subapp, pm);
+			final Command cmd = new DeleteSubAppInterfaceElementCommand(varDecl);
+			ChangeExecutionHelper.executeChange(cmd, varDecl, pm);
 			return super.perform(pm);
 		}
-
 	}
 
 	private static class UpdateManipulatorChange extends CompositeChange {
@@ -314,9 +218,6 @@ public class SafeStructDeletionChange extends CompositeChange {
 
 		public UpdateFBTypeChange(final FBType type) {
 			super(MessageFormat.format(Messages.DeleteFBTypeParticipant_Change_UpdateFBType, type.getName()));
-			if (!hasOpenEditor(type)) {
-				SafeFBTypeDeletionChange.addUpdateChanges(this, type, false);
-			}
 		}
 
 	}
@@ -331,17 +232,6 @@ public class SafeStructDeletionChange extends CompositeChange {
 					subapp.getQualifiedName()));
 			this.subapp = subapp;
 			this.struct = struct;
-			if (!hasOpenEditor(subapp)) {
-				addUpdateChanges();
-			}
-		}
-
-		// triggers the update chain if the subapp is contained inside a typed network
-		private void addUpdateChanges() {
-			// CFB cannot contain a subapp -> only a typed subapp can
-			if (EcoreUtil.getRootContainer(subapp) instanceof final SubAppType type) {
-				SafeFBTypeDeletionChange.addUpdateChanges(this, type, false);
-			}
 		}
 
 		@Override
