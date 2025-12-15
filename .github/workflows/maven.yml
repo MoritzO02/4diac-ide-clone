@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: event_file
         path: ${{ github.event_path }}
@@ -43,7 +43,7 @@ jobs:
         mvn -V -B -fae -ntp clean verify
     - name: Upload Test Results for Java-${{ matrix.java }}
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: test-results-${{ matrix.os }}-java${{ matrix.java }}
         if-no-files-found: error
